@@ -99,3 +99,22 @@ test('paginazione: risposta inattesa o troppe pagine = errore', () => {
   assert.throws(() => fetchAllPages(() => ({}), '/x'));
   assert.throws(() => fetchAllPages(() => new Array(100).fill(0), '/x', 3));
 });
+
+const { permalink } = require('./revity-comment-lib.js');
+
+test('permalink: SHA completo, percorso codificato, riga valida', () => {
+  const sha = 'a'.repeat(40);
+  assert.strictEqual(permalink('o/r', sha, 'src/a b.ts', 12), `https://github.com/o/r/blob/${sha}/src/a%20b.ts#L12`);
+  assert.strictEqual(permalink('o/r', sha, 'a.ts', 'x'), `https://github.com/o/r/blob/${sha}/a.ts#L1`);
+});
+
+test('permalink: vuoto se SHA corto o repo strano', () => {
+  assert.strictEqual(permalink('o/r', 'abc', 'a.ts', 1), '');
+  assert.strictEqual(permalink('o/r/../x', 'a'.repeat(40), 'a.ts', 1), '');
+  assert.strictEqual(permalink('o/r', 'a'.repeat(40), '', 1), '');
+});
+
+test('il corpo include il link se dato', () => {
+  assert.ok(buildCommentBody({ description: 'x' }, 'https://github.com/o/r/blob/s/a#L1').includes('**Code:** https://github.com/o/r/blob/s/a#L1'));
+  assert.ok(!buildCommentBody({ description: 'x' }).includes('**Code:**'));
+});

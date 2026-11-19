@@ -29,7 +29,14 @@ function toLine(value) {
 }
 
 /** Corpo del commento: stessa forma di prima, con testo ripulito. */
-function buildCommentBody(finding) {
+/** Link permanente al codice (SHA completo del commit + riga). Vuoto se mancano i dati. */
+function permalink(repo, sha, path, line) {
+  if (!repo || !/^[0-9a-f]{40}$/.test(sha || '') || !path || !/^[\w.-]+\/[\w.-]+$/.test(repo)) return '';
+  const encoded = String(path).split('/').map(encodeURIComponent).join('/');
+  return `https://github.com/${repo}/blob/${sha}/${encoded}#L${toLine(line)}`;
+}
+
+function buildCommentBody(finding, link) {
   const message = sanitizeText(
     finding.description || (finding.extra && finding.extra.message) || 'Security vulnerability detected', 500);
   const severity = sanitizeText(finding.severity || 'HIGH', 20);
@@ -44,6 +51,7 @@ function buildCommentBody(finding) {
   const rec = finding.recommendation ||
     (finding.extra && finding.extra.metadata && finding.extra.metadata.recommendation);
   if (rec) body += `\n**Recommendation:** ${sanitizeText(rec)}\n`;
+  if (link) body += `\n**Code:** ${link}\n`;
   body += `\n<!-- revity-fp:${fingerprint(finding)} -->`;
   return body;
 }
@@ -84,4 +92,4 @@ function fetchAllPages(ghApi, endpoint, maxPages = 50) {
   throw new Error('Too many pages while listing ' + endpoint);
 }
 
-module.exports = { sanitizeText, toLine, buildCommentBody, fingerprint, existingFingerprints, fetchAllPages, ZWSP };
+module.exports = { permalink, sanitizeText, toLine, buildCommentBody, fingerprint, existingFingerprints, fetchAllPages, ZWSP };

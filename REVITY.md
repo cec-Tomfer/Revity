@@ -14,3 +14,13 @@ Modifiche rispetto all'originale:
 8. Commenti con testo ripulito (`scripts/revity-comment-lib.js`), artefatti disattivati di default.
 
 Esempio di workflow: `examples/revity-workflow.yml`. Nessuna chiave è inclusa: la chiave API va solo nei segreti del repository che usa l'azione.
+
+## Idee riprese dal plugin «code-review» (marketplace Claude), in forma originale
+
+Dalla pagina descrittiva del plugin (nessun codice o prompt copiato: la pagina non indica la licenza e non mostra i prompt) sono state riprese tre idee, riscritte da zero:
+
+- salto di PR chiuse, in bozza o create da bot, senza consumare il tetto (`REVITY_SKIP_DRAFTS`, `REVITY_SKIP_BOTS`);
+- soglia minima di confidenza sulle segnalazioni (`REVITY_MIN_CONFIDENCE`, predefinita 0.8; segnalazioni senza punteggio restano);
+- link permanente al codice (SHA completo + riga) nei commenti.
+
+Non riprese: i cinque agenti paralleli (conformità a CLAUDE.md, cronologia git, commenti vecchi) perché sono una revisione di qualità, non di sicurezza, e moltiplicano la spesa.

@@ -4,7 +4,7 @@ name: Revity security review
 
 on:
   pull_request:            # mai pull_request_target (Revity lo rifiuta)
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read

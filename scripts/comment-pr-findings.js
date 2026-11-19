@@ -6,7 +6,7 @@
 
 const fs = require('fs');
 const { spawnSync } = require('child_process');
-const { toLine, buildCommentBody, fingerprint, existingFingerprints, fetchAllPages } = require('./revity-comment-lib.js');
+const { permalink, toLine, buildCommentBody, fingerprint, existingFingerprints, fetchAllPages } = require('./revity-comment-lib.js');
 
 // Parse GitHub context from environment
 const context = {
@@ -137,7 +137,8 @@ async function run() {
       }
       
       // Build the comment body (Revity: text from the model is sanitized)
-      const commentBody = buildCommentBody(finding);
+      const commentBody = buildCommentBody(finding, permalink(
+        `${context.repo.owner}/${context.repo.repo}`, context.payload.pull_request.head.sha, file, line));
       
       // Prepare the review comment
       const reviewComment = {

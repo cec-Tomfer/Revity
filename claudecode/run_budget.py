@@ -64,6 +64,26 @@ def render_body(state: Dict[str, Any], max_runs: int) -> str:
     return f"{text}\n\n<!-- revity-run-counter {marker} -->"
 
 
+def _flag(value: Optional[str], default: bool = True) -> bool:
+    if value is None or str(value).strip() == "":
+        return default
+    return str(value).strip().lower() not in ("false", "0", "no")
+
+
+def skip_reason(pr_obj: Dict[str, Any], environ=os.environ) -> Optional[str]:
+    """Motivo per non scansionare (e non consumare il tetto): PR chiusa, bozza o di un bot.
+
+    Bozze e bot si possono riabilitare con REVITY_SKIP_DRAFTS / REVITY_SKIP_BOTS = false.
+    """
+    if pr_obj.get("state") not in (None, "open"):
+        return "PR non aperta"
+    if _flag(environ.get("REVITY_SKIP_DRAFTS")) and pr_obj.get("draft") is True:
+        return "PR in bozza: nessuna scansione finché non è pronta"
+    if _flag(environ.get("REVITY_SKIP_BOTS")) and (pr_obj.get("user") or {}).get("type") == "Bot":
+        return "PR creata da un bot (es. aggiornamenti automatici): nessuna scansione"
+    return None
+
+
 def _list_comments(request: Request, repo: str, pr: int) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for page in range(1, MAX_PAGES + 1):
@@ -142,6 +162,14 @@ def main(request: Optional[Request] = None) -> int:
     except (KeyError, OSError, ValueError, TypeError):
         print("::error::Revity: evento PR illeggibile, nessuna scansione")
         return 1
+    reason = skip_reason(pr_obj, os.environ)
+    if reason:
+        print(f"Revity: {reason}")
+        out = os.environ.get("GITHUB_OUTPUT")
+        if out:
+            with open(out, "a", encoding="utf-8") as f:
+                f.write("enable_claudecode=false\nsilence_claudecode_comments=false\n")
+        return 0
     if request is None:
         token = os.environ.get("GITHUB_TOKEN", "")
         if not token:

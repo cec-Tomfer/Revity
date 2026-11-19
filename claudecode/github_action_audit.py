@@ -501,6 +501,14 @@ def apply_findings_filter(findings_filter, original_findings: List[Dict[str, Any
         excluded_findings = []
         analysis_summary = {}
     
+    # Revity: soglia minima di confidenza (campo `confidence` 0-1 del modello; assente = tenuta)
+    min_conf = parse_min_confidence(os.environ.get('REVITY_MIN_CONFIDENCE'))
+    confident, low_conf = split_by_confidence(kept_findings, min_conf)
+    kept_findings = confident
+    excluded_findings = excluded_findings + [
+        {'finding': f, 'exclusion_reason': f'Confidence below {min_conf}', 'filter_stage': 'min_confidence'}
+        for f in low_conf]
+
     # Apply final directory exclusion filtering
     final_kept_findings = []
     directory_excluded_findings = []
@@ -535,6 +543,29 @@ def _is_finding_in_excluded_directory(finding: Dict[str, Any], github_client: Gi
         return False
     
     return github_client._is_excluded(file_path)
+
+
+DEFAULT_MIN_CONFIDENCE = 0.8
+
+
+def parse_min_confidence(value) -> float:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_MIN_CONFIDENCE
+    return v if 0.0 <= v <= 1.0 else DEFAULT_MIN_CONFIDENCE
+
+
+def split_by_confidence(findings: List[Dict[str, Any]], minimum: float):
+    """Separa le segnalazioni con confidenza numerica sotto la soglia. Senza campo: tenute."""
+    kept, low = [], []
+    for f in findings:
+        c = f.get('confidence') if isinstance(f, dict) else None
+        if isinstance(c, (int, float)) and not isinstance(c, bool) and c < minimum:
+            low.append(f)
+        else:
+            kept.append(f)
+    return kept, low
 
 
 def slim_excluded_details(excluded_findings) -> List[Dict[str, Any]]:

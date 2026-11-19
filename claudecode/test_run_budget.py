@@ -130,3 +130,30 @@ def test_cli_writes_outputs_and_refuses_on_error(tmp_path, monkeypatch):
     out.write_text("")
     assert rb.main(request=gh) == 0
     assert "enable_claudecode=false" in out.read_text()
+
+
+# ---- bozze, chiuse, bot (nessun consumo del tetto) ------------------------------------
+
+def test_skip_reasons():
+    assert rb.skip_reason({"draft": True}, {}) and "bozza" in rb.skip_reason({"draft": True}, {})
+    assert rb.skip_reason({"state": "closed"}, {})
+    assert rb.skip_reason({"user": {"type": "Bot"}}, {})
+    assert rb.skip_reason({"draft": False, "state": "open", "user": {"type": "User"}}, {}) is None
+    assert rb.skip_reason({}, {}) is None
+
+
+def test_skip_can_be_disabled():
+    assert rb.skip_reason({"draft": True}, {"REVITY_SKIP_DRAFTS": "false"}) is None
+    assert rb.skip_reason({"user": {"type": "Bot"}}, {"REVITY_SKIP_BOTS": "false"}) is None
+
+
+def test_cli_skips_draft_without_touching_github(tmp_path, monkeypatch):
+    out, ev = tmp_path / "o.txt", tmp_path / "e.json"
+    ev.write_text(json.dumps({"pull_request": {"number": 7, "draft": True, "head": {"sha": "abc"}}}))
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(ev))
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    gh = FakeGitHub()
+    assert rb.main(request=gh) == 0
+    assert "enable_claudecode=false" in out.read_text()
+    assert gh.calls == []
