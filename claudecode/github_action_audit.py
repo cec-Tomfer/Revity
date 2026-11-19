@@ -20,12 +20,14 @@ from claudecode.findings_filter import FindingsFilter
 from claudecode.json_parser import parse_json_with_fallbacks
 from claudecode.constants import (
     EXIT_CONFIGURATION_ERROR,
-    DEFAULT_CLAUDE_MODEL,
+    require_model,
     EXIT_SUCCESS,
     EXIT_GENERAL_ERROR,
     SUBPROCESS_TIMEOUT
 )
 from claudecode.logger import get_logger
+from claudecode import data_limits
+from claudecode.claude_command import build_command, build_env
 
 logger = get_logger(__name__)
 
@@ -54,6 +56,8 @@ class GitHubActionClient:
         
         # Get excluded directories from environment
         exclude_dirs = os.environ.get('EXCLUDE_DIRECTORIES', '')
+        self.last_diff_files: List[str] = []
+        self.last_omitted_files: List[str] = []
         self.excluded_dirs = [d.strip() for d in exclude_dirs.split(',') if d.strip()] if exclude_dirs else []
         if self.excluded_dirs:
             print(f"[Debug] Excluded directories: {self.excluded_dirs}", file=sys.stderr)
@@ -133,10 +137,19 @@ class GitHubActionClient:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         
-        return self._filter_generated_files(response.text)
+        filtered = self._filter_generated_files(response.text)
+        max_chars = os.environ.get('REVITY_MAX_DIFF_CHARS')
+        limited, kept, omitted = data_limits.limit_diff(filtered, max_chars)
+        self.last_diff_files = kept
+        self.last_omitted_files = omitted
+        if omitted:
+            print(f"[Warning] Diff over the size cap: {len(omitted)} file(s) omitted", file=sys.stderr)
+        return limited
     
     def _is_excluded(self, filepath: str) -> bool:
-        """Check if a file should be excluded based on directory patterns."""
+        """Check if a file should be excluded (default Revity exclusions + configured directories)."""
+        if data_limits.is_default_excluded(filepath):
+            return True
         for excluded_dir in self.excluded_dirs:
             # Normalize excluded directory (remove leading ./ if present)
             if excluded_dir.startswith('./'):
@@ -189,7 +202,7 @@ class GitHubActionClient:
 class SimpleClaudeRunner:
     """Simplified Claude Code runner for GitHub Actions."""
     
-    def __init__(self, timeout_minutes: Optional[int] = None):
+    def __init__(self, timeout_minutes: Optional[int] = None, model: Optional[str] = None):
         """Initialize Claude runner.
         
         Args:
@@ -199,6 +212,7 @@ class SimpleClaudeRunner:
             self.timeout_seconds = timeout_minutes * 60
         else:
             self.timeout_seconds = SUBPROCESS_TIMEOUT
+        self.model = model  # se None si legge CLAUDE_MODEL al momento dell'uso
     
     def run_security_audit(self, repo_dir: Path, prompt: str) -> Tuple[bool, str, Dict[str, Any]]:
         """Run Claude Code security audit.
@@ -219,14 +233,16 @@ class SimpleClaudeRunner:
             print(f"[Warning] Large prompt size: {prompt_size / 1024 / 1024:.2f}MB", file=sys.stderr)
         
         try:
+            model = require_model(self.model)
+        except ValueError as e:
+            return False, str(e), {}
+
+        try:
             # Construct Claude Code command
             # Use stdin for prompt to avoid "argument list too long" error
-            cmd = [
-                'claude',
-                '--output-format', 'json',
-                '--model', DEFAULT_CLAUDE_MODEL,
-                '--disallowed-tools', 'Bash(ps:*)'
-            ]
+            # Revity: sola lettura (Read/Grep/Glob), ambiente ripulito (nessun GITHUB_TOKEN)
+            cmd = build_command(model)
+            env = build_env(os.environ)
             
             # Run Claude Code with retry logic
             NUM_RETRIES = 3
@@ -235,6 +251,7 @@ class SimpleClaudeRunner:
                     cmd,
                     input=prompt,  # Pass prompt via stdin
                     cwd=repo_dir,
+                    env=env,
                     capture_output=True,
                     text=True,
                     timeout=self.timeout_seconds
@@ -372,7 +389,7 @@ def get_environment_config() -> Tuple[str, int]:
     return repo_name, pr_number
 
 
-def initialize_clients() -> Tuple[GitHubActionClient, SimpleClaudeRunner]:
+def initialize_clients(model: Optional[str] = None) -> Tuple[GitHubActionClient, SimpleClaudeRunner]:
     """Initialize GitHub and Claude clients.
     
     Returns:
@@ -387,14 +404,15 @@ def initialize_clients() -> Tuple[GitHubActionClient, SimpleClaudeRunner]:
         raise ConfigurationError(f'Failed to initialize GitHub client: {str(e)}')
     
     try:
-        claude_runner = SimpleClaudeRunner()
+        claude_runner = SimpleClaudeRunner(model=model)
     except Exception as e:
         raise ConfigurationError(f'Failed to initialize Claude runner: {str(e)}')
         
     return github_client, claude_runner
 
 
-def initialize_findings_filter(custom_filtering_instructions: Optional[str] = None) -> FindingsFilter:
+def initialize_findings_filter(custom_filtering_instructions: Optional[str] = None,
+                               model: Optional[str] = None) -> FindingsFilter:
     """Initialize findings filter based on environment configuration.
     
     Args:
@@ -417,6 +435,7 @@ def initialize_findings_filter(custom_filtering_instructions: Optional[str] = No
                 use_hard_exclusions=True,
                 use_claude_filtering=True,
                 api_key=api_key,
+                model=model,
                 custom_filtering_instructions=custom_filtering_instructions
             )
         else:
@@ -518,6 +537,18 @@ def _is_finding_in_excluded_directory(finding: Dict[str, Any], github_client: Gi
     return github_client._is_excluded(file_path)
 
 
+def slim_excluded_details(excluded_findings) -> List[Dict[str, Any]]:
+    """Revity: dei risultati scartati restano solo file, motivo e fase (niente testo completo)."""
+    return [{'file': (e.get('finding') or {}).get('file'),
+             'exclusion_reason': e.get('exclusion_reason'),
+             'filter_stage': e.get('filter_stage')}
+            for e in excluded_findings if isinstance(e, dict)]
+
+
+def _as_list(value) -> List[str]:
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
 def main():
     """Main execution function for GitHub Action."""
     try:
@@ -528,6 +559,13 @@ def main():
             print(json.dumps({'error': str(e)}))
             sys.exit(EXIT_CONFIGURATION_ERROR)
         
+        # Revity: il modello deve essere scelto da chi configura, nessun predefinito
+        try:
+            model = require_model()
+        except ValueError as e:
+            print(json.dumps({'error': str(e)}))
+            sys.exit(EXIT_CONFIGURATION_ERROR)
+
         # Load custom filtering instructions if provided
         custom_filtering_instructions = None
         filtering_file = os.environ.get('FALSE_POSITIVE_FILTERING_INSTRUCTIONS', '')
@@ -552,14 +590,14 @@ def main():
         
         # Initialize components
         try:
-            github_client, claude_runner = initialize_clients()
+            github_client, claude_runner = initialize_clients(model)
         except ConfigurationError as e:
             print(json.dumps({'error': str(e)}))
             sys.exit(EXIT_CONFIGURATION_ERROR)
             
         # Initialize findings filter
         try:
-            findings_filter = initialize_findings_filter(custom_filtering_instructions)
+            findings_filter = initialize_findings_filter(custom_filtering_instructions, model)
         except ConfigurationError as e:
             print(json.dumps({'error': str(e)}))
             sys.exit(EXIT_CONFIGURATION_ERROR)
@@ -581,6 +619,12 @@ def main():
         # Generate security audit prompt
         prompt = get_security_audit_prompt(pr_data, pr_diff, custom_scan_instructions=custom_scan_instructions)
         
+        print(data_limits.send_summary(
+            len(prompt.encode('utf-8')),
+            _as_list(getattr(github_client, 'last_diff_files', [])),
+            _as_list(getattr(github_client, 'last_omitted_files', [])),
+            []), file=sys.stderr)
+
         # Run Claude Code security audit
         # Get repo directory from environment or use current directory
         repo_path = os.environ.get('REPO_PATH')
@@ -614,6 +658,10 @@ def main():
             findings_filter, original_findings, pr_context, github_client
         )
         
+        reads = getattr(getattr(findings_filter, 'claude_client', None), 'files_read', [])
+        if isinstance(reads, list) and reads:
+            print(data_limits.send_summary(0, [], [], reads).split('\n', 2)[-1], file=sys.stderr)
+
         # Prepare output
         output = {
             'pr_number': pr_number,
@@ -625,7 +673,8 @@ def main():
                 'excluded_findings': len(excluded_findings),
                 'kept_findings': len(kept_findings),
                 'filter_analysis': analysis_summary,
-                'excluded_findings_details': excluded_findings  # Include full details of what was filtered
+                # Revity: solo motivo e posizione, non il testo completo né le giustificazioni
+                'excluded_findings_details': slim_excluded_details(excluded_findings)
             }
         }
         

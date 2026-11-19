@@ -6,6 +6,7 @@
 
 const fs = require('fs');
 const { spawnSync } = require('child_process');
+const { toLine, buildCommentBody, fingerprint, existingFingerprints, fetchAllPages } = require('./revity-comment-lib.js');
 
 // Parse GitHub context from environment
 const context = {
@@ -105,7 +106,7 @@ async function run() {
     }
     
     // Get the PR diff to map file lines to diff positions
-    const prFiles = ghApi(`/repos/${context.repo.owner}/${context.repo.repo}/pulls/${context.issue.number}/files?per_page=100`);
+    const prFiles = fetchAllPages(ghApi, `/repos/${context.repo.owner}/${context.repo.repo}/pulls/${context.issue.number}/files`);
     
     // Create a map of file paths to their diff information
     const fileMap = {};
@@ -128,34 +129,15 @@ async function run() {
     // Process findings synchronously (gh cli doesn't support async well)
     for (const finding of newFindings) {
       const file = finding.file || finding.path;
-      const line = finding.line || (finding.start && finding.start.line) || 1;
-      const message = finding.description || (finding.extra && finding.extra.message) || 'Security vulnerability detected';
-      const severity = finding.severity || 'HIGH';
-      const category = finding.category || 'security_issue';
-      
+      const line = toLine(finding.line || (finding.start && finding.start.line));
       // Check if this file is part of the PR diff
       if (!fileMap[file]) {
         console.log(`File ${file} not in PR diff, skipping`);
         continue;
       }
       
-      // Build the comment body
-      let commentBody = `🤖 **Security Issue: ${message}**\n\n`;
-      commentBody += `**Severity:** ${severity}\n`;
-      commentBody += `**Category:** ${category}\n`;
-      commentBody += `**Tool:** ClaudeCode AI Security Analysis\n`;
-      
-      // Add exploit scenario if available
-      if (finding.exploit_scenario || (finding.extra && finding.extra.metadata && finding.extra.metadata.exploit_scenario)) {
-        const exploitScenario = finding.exploit_scenario || finding.extra.metadata.exploit_scenario;
-        commentBody += `\n**Exploit Scenario:** ${exploitScenario}\n`;
-      }
-      
-      // Add recommendation if available
-      if (finding.recommendation || (finding.extra && finding.extra.metadata && finding.extra.metadata.recommendation)) {
-        const recommendation = finding.recommendation || finding.extra.metadata.recommendation;
-        commentBody += `\n**Recommendation:** ${recommendation}\n`;
-      }
+      // Build the comment body (Revity: text from the model is sanitized)
+      const commentBody = buildCommentBody(finding);
       
       // Prepare the review comment
       const reviewComment = {
@@ -173,20 +155,23 @@ async function run() {
       return;
     }
     
-    // Check for existing review comments to avoid duplicates
-    const comments = ghApi(`/repos/${context.repo.owner}/${context.repo.repo}/pulls/${context.issue.number}/comments`);
-    
-    // Check if we've already commented on these findings
-    const existingSecurityComments = comments.filter(comment => 
-      comment.user.type === 'Bot' && 
-      comment.body && comment.body.includes('🤖 **Security Issue:')
-    );
-    
-    if (existingSecurityComments.length > 0) {
-      console.log(`Found ${existingSecurityComments.length} existing security comments, skipping to avoid duplicates`);
+    // Revity: every new commit can bring new findings. Skip only the ones already reported
+    // (matched by fingerprint: file + category + description), reading ALL pages of comments.
+    const comments = fetchAllPages(ghApi, `/repos/${context.repo.owner}/${context.repo.repo}/pulls/${context.issue.number}/comments`);
+    const already = existingFingerprints(comments);
+    const before = reviewComments.length;
+    for (let i = reviewComments.length - 1; i >= 0; i--) {
+      const m = /<!-- revity-fp:([0-9a-f]{16}) -->/.exec(reviewComments[i].body);
+      if (m && already.has(m[1])) reviewComments.splice(i, 1);
+    }
+    if (before !== reviewComments.length) {
+      console.log(`Skipped ${before - reviewComments.length} finding(s) already reported on this PR`);
+    }
+    if (reviewComments.length === 0) {
+      console.log('No new findings to comment');
       return;
     }
-        
+
     try {
       // Create a review with all the comments
       const reviewData = {

@@ -9,9 +9,10 @@ from pathlib import Path
 from anthropic import Anthropic
 
 from claudecode.constants import (
-    DEFAULT_CLAUDE_MODEL, DEFAULT_TIMEOUT_SECONDS, DEFAULT_MAX_RETRIES,
+    DEFAULT_CLAUDE_MODEL, require_model, DEFAULT_TIMEOUT_SECONDS, DEFAULT_MAX_RETRIES,
     RATE_LIMIT_BACKOFF_MAX, PROMPT_TOKEN_LIMIT,
 )
+from claudecode import data_limits
 from claudecode.json_parser import parse_json_with_fallbacks
 from claudecode.logger import get_logger
 
@@ -34,7 +35,8 @@ class ClaudeAPIClient:
             timeout_seconds: Request timeout in seconds
             max_retries: Maximum retry attempts for API calls
         """
-        self.model = model or DEFAULT_CLAUDE_MODEL
+        self.model = require_model(model)
+        self.files_read = []  # (path, bytes) letti per il filtro, per il riepilogo
         self.timeout_seconds = timeout_seconds or DEFAULT_TIMEOUT_SECONDS
         self.max_retries = max_retries or DEFAULT_MAX_RETRIES
         
@@ -49,27 +51,6 @@ class ClaudeAPIClient:
         # Initialize Anthropic client
         self.client = Anthropic(api_key=self.api_key)
         logger.info("Claude API client initialized successfully")
-    
-    def validate_api_access(self) -> Tuple[bool, str]:
-        """Validate that API access is working.
-        
-        Returns:
-            Tuple of (success, error_message)
-        """
-        try:
-            # Simple test call to verify API access
-            self.client.messages.create(
-                model="claude-3-5-haiku-20241022",
-                max_tokens=10,
-                messages=[{"role": "user", "content": "Hello"}],
-                timeout=10
-            )
-            logger.info("Claude API access validated successfully")
-            return True, ""
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"Claude API validation failed: {error_msg}")
-            return False, f"API validation failed: {error_msg}"
     
     def call_with_retry(self, 
                        prompt: str,
@@ -311,50 +292,21 @@ Respond with EXACTLY this JSON structure (no markdown, no code blocks):
 
     
     def _read_file(self, file_path: str) -> Tuple[bool, str, str]:
-        """Read a file and format it with line numbers.
-        
-        Args:
-            file_path: Path to the file to read
-            
-        Returns:
-            Tuple of (success, formatted_content, error_message)
+        """Read a file for the filter, only inside the repository and up to a byte cap.
+
+        Revity: absolute paths, `..`, escaping symlinks and secret files are refused
+        (the path comes from the model output, which is untrusted).
         """
-        try:
-            # Check if REPO_PATH is set and use it as base path
-            repo_path = os.environ.get('REPO_PATH')
-            if repo_path:
-                # Convert file_path to Path and check if it's absolute
-                path = Path(file_path)
-                if not path.is_absolute():
-                    # Make it relative to REPO_PATH
-                    path = Path(repo_path) / file_path
-            else:
-                path = Path(file_path)
-            
-            if not path.exists():
-                return False, "", f"File not found: {path}"
-            
-            if not path.is_file():
-                return False, "", f"Path is not a file: {path}"
-            
-            # Read file with error handling for encoding issues
-            try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-            except UnicodeDecodeError:
-                # Try with latin-1 encoding as fallback
-                with open(path, 'r', encoding='latin-1') as f:
-                    content = f.read()
-            
-            return True, content, ""
-            
-        except Exception as e:
-            error_msg = f"Error reading file {file_path}: {str(e)}"
-            logger.error(error_msg)
-            return False, "", error_msg
+        repo_root = os.environ.get('REPO_PATH') or os.getcwd()
+        max_bytes = os.environ.get('REVITY_MAX_FILE_BYTES')
+        ok, content, error, size = data_limits.read_repo_file(repo_root, file_path, max_bytes)
+        if not ok:
+            return False, "", error
+        self.files_read.append((file_path, size))
+        return True, content, ""
 
 
-def get_claude_api_client(model: str = DEFAULT_CLAUDE_MODEL,
+def get_claude_api_client(model: Optional[str] = None,
                          api_key: Optional[str] = None,
                          timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> ClaudeAPIClient:
     """Convenience function to get Claude API client.

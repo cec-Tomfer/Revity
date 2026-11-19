@@ -5,13 +5,24 @@ Constants and configuration values for ClaudeCode.
 import os
 
 # API Configuration
-DEFAULT_CLAUDE_MODEL = os.environ.get('CLAUDE_MODEL') or 'claude-opus-4-1-20250805'
+# Revity: nessun modello predefinito. Il modello lo sceglie chi configura il workflow
+# (input `claude-model`, variabile CLAUDE_MODEL). Se manca, la scansione si ferma con un errore.
+DEFAULT_CLAUDE_MODEL = os.environ.get('CLAUDE_MODEL') or ''
+
+
+def require_model(value=None) -> str:
+    """Ritorna il nome del modello o solleva ValueError se non è configurato."""
+    model = (value or os.environ.get('CLAUDE_MODEL') or '').strip()
+    if not model:
+        raise ValueError("Modello non configurato: imposta l'input 'claude-model' (CLAUDE_MODEL)")
+    return model
+
 DEFAULT_TIMEOUT_SECONDS = 180  # 3 minutes
 DEFAULT_MAX_RETRIES = 3
 RATE_LIMIT_BACKOFF_MAX = 30  # Maximum backoff time for rate limits
 
 # Token Limits
-PROMPT_TOKEN_LIMIT = 16384  # 16k tokens max for claude-opus-4
+PROMPT_TOKEN_LIMIT = 16384  # 16k tokens max per risposta
 
 # Exit Codes
 EXIT_SUCCESS = 0

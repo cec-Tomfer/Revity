@@ -1,0 +1,36 @@
+# Esempio di workflow per Revity. Valori tra <> da compilare; NIENTE chiavi qui dentro.
+# Il repository di Revity non esiste ancora: il riferimento va fissato al commit completo.
+name: Revity security review
+
+on:
+  pull_request:            # mai pull_request_target (Revity lo rifiuta)
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# Una sola esecuzione alla volta per PR; le vecchie si annullano: il contatore resta corretto.
+concurrency:
+  group: revity-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Le PR da fork non ricevono i segreti e Revity le rifiuta comunque.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false   # nessuna credenziale in .git/config
+
+      - uses: <owner>/revity@<SHA-COMPLETO-DEL-COMMIT>
+        with:
+          claude-model: <nome del modello scelto>
+          claude-api-key: ${{ secrets.<NOME_DEL_SEGRETO> }}
+          max-runs-per-pr: '5'
+          exclude-directories: 'tests,docs'

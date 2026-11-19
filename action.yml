@@ -9,9 +9,9 @@ inputs:
     default: 'true'
   
   upload-results:
-    description: 'Whether to upload results as artifacts'
+    description: 'Whether to upload results as artifacts (Revity: off by default; the error log is never uploaded)'
     required: false
-    default: 'true'
+    default: 'false'
   
   exclude-directories:
     description: 'Comma-separated list of directories to exclude from scanning'
@@ -29,14 +29,14 @@ inputs:
     default: ''
 
   claude-model:
-    description: 'Claude model to use for security analysis (e.g., claude-sonnet-4-20250514)'
-    required: false
+    description: 'Claude model to use (required: Revity has no default model; choose it in the workflow)'
+    required: true
     default: ''
 
-  run-every-commit:
-    description: 'Run ClaudeCode on every commit (skips cache check). Warning: This may lead to more false positives on PRs with many commits as the AI analyzes the same code multiple times.'
+  max-runs-per-pr:
+    description: 'Revity: maximum number of scans per PR. Every new commit is scanned until the cap is reached (default 5, allowed 1-50).'
     required: false
-    default: 'false'
+    default: '5'
 
   false-positive-filtering-instructions:
     description: 'Path to custom false positive filtering instructions text file'
@@ -60,105 +60,42 @@ outputs:
 runs:
   using: 'composite'
   steps:
-    - name: Install GitHub CLI
+    - name: Check required tools (gh, jq must be preinstalled on the runner)
       shell: bash
       run: |
-        echo "::group::Install gh CLI"
-        # Install GitHub CLI for PR operations
-        sudo apt-get update && sudo apt-get install -y gh
-        echo "::endgroup::"
-    
+        # Revity: nothing is installed with the system package manager. GitHub-hosted ubuntu runners ship gh and jq
+        # (not verified for self-hosted runners: they must provide them).
+        for tool in gh jq; do
+          command -v "$tool" >/dev/null || { echo "::error::$tool not found on the runner"; exit 1; }
+        done
+
     - name: Set up Python
       uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0 pinned to commit hash
       with:
-        python-version: '3.x'
-    
-    - name: Check ClaudeCode run history
-      id: claudecode-history
-      if: github.event_name == 'pull_request'
-      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0 pinned to commit hash
-      with:
-        path: .claudecode-marker
-        key: claudecode-${{ github.repository_id }}-pr-${{ github.event.pull_request.number }}-${{ github.sha }}
-        restore-keys: |
-          claudecode-${{ github.repository_id }}-pr-${{ github.event.pull_request.number }}-
-    
-    - name: Determine ClaudeCode enablement
+        python-version: '3.13'
+
+    - name: Check event and PR origin (refuse forks and pull_request_target)
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        python -I "$ACTION_PATH/claudecode/event_guard.py"
+
+    - name: Revity run budget (one scan per new commit, capped per PR)
       id: claudecode-check
       shell: bash
       env:
-        PR_NUMBER: ${{ github.event.pull_request.number }}
-        RUN_EVERY_COMMIT: ${{ inputs.run-every-commit }}
+        ACTION_PATH: ${{ github.action_path }}
+        GITHUB_TOKEN: ${{ github.token }}
+        REVITY_MAX_RUNS: ${{ inputs.max-runs-per-pr }}
       run: |
-        # Check if ClaudeCode should be enabled
-        ENABLE_CLAUDECODE="true"
-        SILENCE_CLAUDECODE_COMMENTS="false"
-        
-        # For PRs, check sampling and cache
-        if [ "${{ github.event_name }}" == "pull_request" ]; then
-          PR_NUMBER="$PR_NUMBER"
-          CACHE_HIT="${{ steps.claudecode-history.outputs.cache-hit }}"
+        python -I "$ACTION_PATH/claudecode/run_budget.py"
 
-          # Now check cache - if ClaudeCode has already run, disable unless run-every-commit is true
-          # Check if marker file exists (cache may have been restored from a different SHA)
-          if [ "$RUN_EVERY_COMMIT" != "true" ] && [ -f ".claudecode-marker/marker.json" ]; then
-            echo "ClaudeCode has already run on PR #$PR_NUMBER (found marker file), forcing disable to avoid false positives"
-            ENABLE_CLAUDECODE="false"
-          elif [ "$RUN_EVERY_COMMIT" == "true" ] && [ -f ".claudecode-marker/marker.json" ]; then
-            echo "ClaudeCode has already run on PR #$PR_NUMBER but run-every-commit is enabled, running again"
-          elif [ "$ENABLE_CLAUDECODE" == "true" ]; then
-            echo "ClaudeCode will run for PR #$PR_NUMBER (first run)"
-          fi
-        fi
-        
-        echo "enable_claudecode=$ENABLE_CLAUDECODE" >> $GITHUB_OUTPUT
-        echo "silence_claudecode_comments=$SILENCE_CLAUDECODE_COMMENTS" >> $GITHUB_OUTPUT
-        
-        if [ "$ENABLE_CLAUDECODE" == "true" ]; then
-          echo "ClaudeCode is enabled for this run"
-        else
-          echo "ClaudeCode is disabled for this run"
-        fi
-    
-    - name: Reserve ClaudeCode slot to prevent race conditions
-      if: steps.claudecode-check.outputs.enable_claudecode == 'true' && github.event_name == 'pull_request'
-      shell: bash
-      env:
-        REPOSITORY_ID: ${{ github.repository_id }}
-        REPOSITORY: ${{ github.repository }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
-        SHA: ${{ github.sha }}
-        RUN_ID: ${{ github.run_id }}
-        RUN_NUMBER: ${{ github.run_number }}
-      run: |
-        # Create a reservation marker immediately to prevent other concurrent runs
-        mkdir -p .claudecode-marker
-        cat > .claudecode-marker/marker.json << EOF
-        {
-          "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-          "repository_id": "$REPOSITORY_ID",
-          "repository": "$REPOSITORY",
-          "pr_number": $PR_NUMBER,
-          "sha": "$SHA",
-          "status": "reserved",
-          "run_id": "$RUN_ID",
-          "run_number": "$RUN_NUMBER"
-        }
-        EOF
-        echo "Created ClaudeCode reservation marker for PR #$PR_NUMBER"
-    
-    - name: Save ClaudeCode reservation to cache
-      if: steps.claudecode-check.outputs.enable_claudecode == 'true' && github.event_name == 'pull_request'
-      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0 pinned to commit hash
-      with:
-        path: .claudecode-marker
-        key: claudecode-${{ github.repository_id }}-pr-${{ github.event.pull_request.number }}-${{ github.sha }}
-    
     - name: Set up Node.js
       if: steps.claudecode-check.outputs.enable_claudecode == 'true'
       uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 pinned to commit hash
       with:
-        node-version: '18'
+        node-version: '22'
     
     - name: Install dependencies
       shell: bash
@@ -167,10 +104,9 @@ runs:
       run: |
         echo "::group::Install Deps"
         if [ "${{ steps.claudecode-check.outputs.enable_claudecode }}" == "true" ]; then
-          pip install -r "$ACTION_PATH/claudecode/requirements.txt"
-          npm install -g @anthropic-ai/claude-code
+          pip install --require-hashes -r "$ACTION_PATH/claudecode/requirements.lock"
+          npm install -g @anthropic-ai/claude-code@2.1.317
         fi
-        sudo apt-get update && sudo apt-get install -y jq
         echo "::endgroup::"
     
     - name: Run ClaudeCode scan
@@ -207,12 +143,19 @@ runs:
         if [ -z "$ANTHROPIC_API_KEY" ]; then
           echo "::error::ANTHROPIC_API_KEY is not set. Please provide the claude-api-key input to the action."
           echo "Example usage:"
-          echo "  - uses: anthropics/claude-code-security-reviewer@main"
+          echo "  - uses: <owner>/revity@<full-commit-sha>"
           echo "    with:"
-          echo "      claude-api-key: \$\{{ secrets.ANTHROPIC_API_KEY }}"
+          echo "      claude-model: <model name>"
+          echo "      claude-api-key: <secret named in your workflow>"
           exit 1
         fi
                 
+        # Revity: the model must be chosen explicitly
+        if [ -z "$CLAUDE_MODEL" ]; then
+          echo "::error::claude-model is not set. Revity has no default model: set the claude-model input."
+          exit 1
+        fi
+
         # Set timeout
         export CLAUDE_TIMEOUT="$CLAUDECODE_TIMEOUT"
         
@@ -258,12 +201,11 @@ runs:
             echo "::warning::ClaudeCode may have failed silently. Check claudecode-error.log"
             if [ -f claudecode/claudecode-error.log ]; then
               echo "Error log contents:"
-              cat claudecode/claudecode-error.log
+              tail -n 20 claudecode/claudecode-error.log | cut -c1-300
             fi
             echo "findings_count=0" >> $GITHUB_OUTPUT
           else
-            echo "ClaudeCode results preview:"
-            head -n 300 claudecode/claudecode-results.json || echo "Unable to preview results"
+            echo "ClaudeCode results: $(jq -r '"findings=" + ((.findings // []) | length | tostring)' claudecode/claudecode-results.json 2>/dev/null || echo 'summary unavailable')"
                         
             # Check if the result is an error
             if jq -e '.error' claudecode/claudecode-results.json > /dev/null 2>&1; then
@@ -276,6 +218,10 @@ runs:
               echo "::debug::Extracted ClaudeCode findings count: $CLAUDECODE_FINDINGS_COUNT"
               echo "findings_count=$CLAUDECODE_FINDINGS_COUNT" >> $GITHUB_OUTPUT
               echo "ClaudeCode found $CLAUDECODE_FINDINGS_COUNT security issues"
+              FILTER_API_ERRORS=$(jq -r '.filtering_summary.filter_analysis.api_errors // 0' claudecode/claudecode-results.json 2>/dev/null || echo "0")
+              if [ "$FILTER_API_ERRORS" != "0" ]; then
+                echo "::warning::The false-positive filter failed for $FILTER_API_ERRORS finding(s): they were kept unfiltered"
+              fi
               
               # Also create findings.json for PR comment script
               jq '.findings // []' claudecode/claudecode-results.json > findings.json || echo '[]' > findings.json
@@ -284,8 +230,8 @@ runs:
         else
           echo "::warning::ClaudeCode results file not found"
           if [ -f claudecode/claudecode-error.log ]; then
-            echo "Error log contents:"
-            cat claudecode/claudecode-error.log
+            echo "Error log (last 20 lines):"
+            tail -n 20 claudecode/claudecode-error.log | cut -c1-300
           fi
           echo "findings_count=0" >> $GITHUB_OUTPUT
         fi
@@ -313,7 +259,6 @@ runs:
         path: |
           findings.json
           claudecode-results.json
-          claudecode-error.log
         retention-days: 7
         if-no-files-found: ignore
     

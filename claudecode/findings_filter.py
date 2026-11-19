@@ -6,7 +6,6 @@ import time
 from dataclasses import dataclass, field
 
 from claudecode.claude_api_client import ClaudeAPIClient
-from claudecode.constants import DEFAULT_CLAUDE_MODEL
 from claudecode.logger import get_logger
 
 logger = get_logger(__name__)
@@ -22,6 +21,7 @@ class FilterStats:
     exclusion_breakdown: Dict[str, int] = field(default_factory=dict)
     confidence_scores: List[float] = field(default_factory=list)
     runtime_seconds: float = 0.0
+    api_errors: int = 0
 
 
 class HardExclusionRules:
@@ -161,7 +161,7 @@ class FindingsFilter:
                  use_hard_exclusions: bool = True,
                  use_claude_filtering: bool = True,
                  api_key: Optional[str] = None,
-                 model: str = DEFAULT_CLAUDE_MODEL,
+                 model: Optional[str] = None,
                  custom_filtering_instructions: Optional[str] = None):
         """Initialize findings filter.
         
@@ -176,24 +176,13 @@ class FindingsFilter:
         self.use_claude_filtering = use_claude_filtering
         self.custom_filtering_instructions = custom_filtering_instructions
         
-        # Initialize Claude client if filtering is enabled
+        # Initialize Claude client if filtering is enabled.
+        # Revity: nessuna prova con modello fisso e nessun silenzio: se il client non si
+        # può creare (chiave o modello mancanti) l'errore sale e la scansione si ferma.
         self.claude_client = None
         if self.use_claude_filtering:
-            try:
-                self.claude_client = ClaudeAPIClient(
-                    model=model,
-                    api_key=api_key
-                )
-                # Validate API access
-                valid, error = self.claude_client.validate_api_access()
-                if not valid:
-                    logger.warning(f"Claude API validation failed: {error}")
-                    self.claude_client = None
-                    self.use_claude_filtering = False
-            except Exception as e:
-                logger.error(f"Failed to initialize Claude client: {str(e)}")
-                self.use_claude_filtering = False
-    
+            self.claude_client = ClaudeAPIClient(model=model, api_key=api_key)
+
     def filter_findings(self, 
                        findings: List[Dict[str, Any]],
                        pr_context: Optional[Dict[str, Any]] = None) -> Tuple[bool, Dict[str, Any], FilterStats]:
@@ -297,6 +286,7 @@ class FindingsFilter:
                 else:
                     # Claude API call failed for this finding - keep it with warning
                     logger.warning(f"Claude API call failed for finding {orig_idx}: {error_msg}")
+                    stats.api_errors += 1
                     enriched_finding = finding.copy()
                     enriched_finding['_filter_metadata'] = {
                         'confidence_score': 10.0,  # Default high confidence
@@ -332,6 +322,7 @@ class FindingsFilter:
                 "hard_excluded": stats.hard_excluded,
                 "claude_excluded": stats.claude_excluded,
                 "exclusion_breakdown": stats.exclusion_breakdown,
+                "api_errors": stats.api_errors,
                 "average_confidence": sum(stats.confidence_scores) / len(stats.confidence_scores) if stats.confidence_scores else None,
                 "runtime_seconds": stats.runtime_seconds
             }

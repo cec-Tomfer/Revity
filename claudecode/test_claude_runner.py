@@ -10,7 +10,6 @@ from unittest.mock import Mock, patch
 from pathlib import Path
 
 from claudecode.github_action_audit import SimpleClaudeRunner
-from claudecode.constants import DEFAULT_CLAUDE_MODEL
 
 
 class TestSimpleClaudeRunner:
@@ -163,12 +162,8 @@ class TestSimpleClaudeRunner:
         # Verify subprocess call
         mock_run.assert_called_once()
         call_args = mock_run.call_args
-        assert call_args[0][0] == [
-            'claude',
-            '--output-format', 'json',
-            '--model', DEFAULT_CLAUDE_MODEL,
-            '--disallowed-tools', 'Bash(ps:*)'
-        ]
+        from claudecode.claude_command import build_command
+        assert call_args[0][0] == build_command('claude-test-model')
         assert call_args[1]['input'] == 'test prompt'
         assert call_args[1]['cwd'] == Path('/tmp/test')
     
